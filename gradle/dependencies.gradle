@@ -82,7 +82,8 @@ versions += [
   slf4j: "1.7.25",
   snappy: "1.1.7.2",
   zkclient: "0.10",
-  zookeeper: "3.4.13"
+  zookeeper: "3.4.13",
+  commons_csv: "1.5"
 ]
 
 libs += [
@@ -139,5 +140,6 @@ libs += [
   zkclient: "com.101tec:zkclient:$versions.zkclient",
   zookeeper: "org.apache.zookeeper:zookeeper:$versions.zookeeper",
   jfreechart: "jfreechart:jfreechart:$versions.jfreechart",
-  mavenArtifact: "org.apache.maven:maven-artifact:$versions.mavenArtifact"
+  mavenArtifact: "org.apache.maven:maven-artifact:$versions.mavenArtifact",
+  commons_csv: "org.apache.commons:commons-csv:$versions.commons_csv"
 ]

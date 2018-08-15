@@ -898,6 +898,7 @@ project(':tools') {
     compile project(':clients')
     compile project(':log4j-appender')
     compile libs.argparse4j
+    compile libs.commons_csv
     compile libs.jacksonDatabind
     compile libs.slf4jApi
 

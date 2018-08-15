@@ -19,6 +19,8 @@ package org.apache.kafka.tools;
 import static net.sourceforge.argparse4j.impl.Arguments.store;
 import static net.sourceforge.argparse4j.impl.Arguments.storeTrue;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,6 +32,10 @@ import java.util.Random;
 import java.util.Arrays;
 
 import net.sourceforge.argparse4j.inf.MutuallyExclusiveGroup;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
+
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -60,9 +66,13 @@ public class ProducerPerformance {
             String producerConfig = res.getString("producerConfigFile");
             String payloadFilePath = res.getString("payloadFile");
             String transactionalId = res.getString("transactionalId");
+
             boolean shouldPrintMetrics = res.getBoolean("printMetrics");
             long transactionDurationMs = res.getLong("transactionDurationMs");
             boolean transactionsEnabled =  0 < transactionDurationMs;
+
+            String outputPath = res.getString("outputPath");
+            boolean outputWithHeader = res.getBoolean("outputWithHeader");
 
             // since default value gets printed with the help text, we are escaping \n there and replacing it with correct value here.
             String payloadDelimiter = res.getString("payloadDelimiter").equals("\\n") ? "\n" : res.getString("payloadDelimiter");
@@ -159,16 +169,13 @@ public class ProducerPerformance {
             if (!shouldPrintMetrics) {
                 producer.close();
 
-                /* print final results */
-                stats.printTotal();
+                printFinalResults(outputPath, stats, outputWithHeader);
             } else {
                 // Make sure all messages are sent before printing out the stats and the metrics
                 // We need to do this in a different branch for now since tests/kafkatest/sanity_checks/test_performance_services.py
                 // expects this class to work with older versions of the client jar that don't support flush().
                 producer.flush();
-
-                /* print final results */
-                stats.printTotal();
+                printFinalResults(outputPath, stats, outputWithHeader);
 
                 /* print out metrics */
                 ToolsUtils.printMetrics(producer.metrics());
@@ -184,6 +191,15 @@ public class ProducerPerformance {
             }
         }
 
+    }
+
+    private static void printFinalResults(String outputPath, Stats stats, boolean outputWithHeader) throws IOException {
+        stats.end();
+        stats.printTotal();
+
+        if (outputPath != null) {
+            stats.printToCSV(outputPath, outputWithHeader);
+        }
     }
 
     /** Get the command-line argument parser. */
@@ -291,6 +307,29 @@ public class ProducerPerformance {
                .setDefault(0L)
                .help("The max age of each transaction. The commitTransaction will be called after this time has elapsed. Transactions are only enabled if this value is positive.");
 
+        parser.addArgument("--output-with-header")
+                .action(storeTrue())
+                .required(false)
+                .type(Boolean.class)
+                .dest("outputWithHeader")
+                .help("Print out final results to output file with headers.");
+
+        parser.addArgument("--output-type")
+                .action(store())
+                .required(false)
+                .type(String.class)
+                .metavar("OUTPUT-TYPE")
+                .dest("outputType")
+                .setDefault("csv")
+                .help("Specify format type OUTPUT-TYPE for the output file. By default it is CSV.");
+
+        parser.addArgument("--output-path")
+                .action(store())
+                .required(false)
+                .type(String.class)
+                .metavar("OUTPUT-PATH")
+                .dest("outputPath")
+                .help("Write final results (excluding metrics) to the file OUTPUT-PATH. Existing file will be overridden.");
 
         return parser;
     }
@@ -311,6 +350,8 @@ public class ProducerPerformance {
         private long windowTotalLatency;
         private long windowBytes;
         private long reportingInterval;
+        private long elapsed;
+        private Object[] finalResults;
 
         public Stats(long numRecords, int reportingInterval) {
             this.start = System.currentTimeMillis();
@@ -375,21 +416,50 @@ public class ProducerPerformance {
             this.windowBytes = 0;
         }
 
-        public void printTotal() {
-            long elapsed = System.currentTimeMillis() - start;
-            double recsPerSec = 1000.0 * count / (double) elapsed;
-            double mbPerSec = 1000.0 * this.bytes / (double) elapsed / (1024.0 * 1024.0);
+        public void end() {
+            elapsed = System.currentTimeMillis() - start;
             int[] percs = percentiles(this.latencies, index, 0.5, 0.95, 0.99, 0.999);
-            System.out.printf("%d records sent, %f records/sec (%.2f MB/sec), %.2f ms avg latency, %.2f ms max latency, %d ms 50th, %d ms 95th, %d ms 99th, %d ms 99.9th.%n",
-                              count,
-                              recsPerSec,
-                              mbPerSec,
-                              totalLatency / (double) count,
-                              (double) maxLatency,
-                              percs[0],
-                              percs[1],
-                              percs[2],
-                              percs[3]);
+
+            finalResults = new FinalResults(percs).invoke();
+        }
+
+        public void printTotal() {
+            System.out.printf("%d records sent, %f records/sec (%.2f MB/sec), %.2f ms avg latency, %.2f ms max latency, " +
+                              "%d ms 50th, %d ms 95th, %d ms 99th, %d ms 99.9th.%n", finalResults);
+        }
+
+        public void printToCSV(String csvPath, boolean outputWithHeader) throws IOException {
+            try (
+                    BufferedWriter writer = Files.newBufferedWriter(Paths.get(csvPath));
+
+                    CSVPrinter csvPrinter = (outputWithHeader) ? new CSVPrinter(writer, CSVFormat.DEFAULT.withHeader(
+                            "records sent",
+                            "records/sec",
+                            "MB/sec",
+                            "ms avg latency",
+                            "ms max latency",
+                            "ms 50th",
+                            "ms 95th",
+                            "ms 99th",
+                            "ms 99.9th"))
+                    : new CSVPrinter(writer, CSVFormat.DEFAULT);
+            ) {
+                csvPrinter.printRecord(finalResults);
+
+                csvPrinter.flush();
+            }
+        }
+
+        private double getAvgLatency() {
+            return totalLatency / (double) count;
+        }
+
+        private double getRecsPerSec() {
+            return 1000.0 * count / (double) elapsed;
+        }
+
+        private double getMbPerSec() {
+             return 1000.0 * this.bytes / (double) elapsed / (1024.0 * 1024.0);
         }
 
         private static int[] percentiles(int[] latencies, int count, double... percentiles) {
@@ -401,6 +471,26 @@ public class ProducerPerformance {
                 values[i] = latencies[index];
             }
             return values;
+        }
+
+        private class FinalResults {
+            private int[] percs;
+
+            public FinalResults(int... percs) {
+                this.percs = percs;
+            }
+
+            public Object[] invoke() {
+                return new Object[]{count,
+                        getRecsPerSec(),
+                        getMbPerSec(),
+                        getAvgLatency(),
+                        (double) maxLatency,
+                        percs[0],
+                        percs[1],
+                        percs[2],
+                        percs[3]};
+            }
         }
     }
 
